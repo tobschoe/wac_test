@@ -7,7 +7,10 @@ include("wac/aircraft.lua")
 
 
 util.AddNetworkString("wac.aircraft.updateWeapons")
-
+VWAR = VWAR or {}
+VWAR.Missiles = VWAR.Missiles or {}
+CDrones = CDrones or {}
+CDrones.ActiveDrones = CDrones.ActiveDrones or {}
 
 ENT.IgnoreDamage = true
 ENT.wac_ignore = true
@@ -142,6 +145,12 @@ function ENT:Initialize()
 	self:addSeats()
 	self:addStuff()
 	self:addNpcTargets()
+
+	// DRONES //
+	self.CDrone = self.CDrone or false
+	if (self.CDrone) then
+		table.insert(CDrones.ActiveDrones, self)
+	end
 
 	self.phys:EnableDrag(false)
 	
@@ -493,19 +502,88 @@ function ENT:EjectPassenger(ply,idx,t)
 			return
 		end
 	end
+
+	local veh = ply:GetVehicle()
+	local droneSeat = IsValid(veh) and veh.droneSeat
+
 	ply.LastVehicleEntered = CurTime()+0.5
 	ply:ExitVehicle()
-	ply:SetPos(self:LocalToWorld(self.Seats[idx].exit))
-	ply:SetVelocity(self:GetPhysicsObject():GetVelocity()*1.2)
-	ply:SetEyeAngles((self:LocalToWorld(self.Seats[idx].pos-Vector(0,0,40))-ply:GetPos()):Angle())
+
+	if (not droneSeat) then
+		ply:SetPos(self:LocalToWorld(self.Seats[idx].exit))
+		ply:SetVelocity(self:GetPhysicsObject():GetVelocity()*1.2)
+		ply:SetEyeAngles((self:LocalToWorld(self.Seats[idx].pos-Vector(0,0,40))-ply:GetPos()):Angle())
+	end
+
 	self:updateSeats()
 end
 
+function ENT:addDroneSeats(console)
+	self.seats = {}
+	self.Seats = self.DroneSeatValues
+
+	local e = self:addEntity("wac_seat_connector")
+	e:SetPos(self:LocalToWorld(self.SeatSwitcherPos))
+	e:SetNoDraw(true)
+	e:Spawn()
+	e:Activate()
+	e.wac_ignore = true
+	e:SetNotSolid(true)
+	e:SetParent(self)
+	self:SetSwitcher(e)
+	for i = 1, 2 do 
+		self.seats[i] = self:addEntity("prop_vehicle_prisoner_pod")
+		self.seats[i].activeProfile = 1
+		self.seats[i]:SetModel("models/nova/airboat_seat.mdl") 
+		self.seats[i]:SetColor(Color(0, 0, 0, 200))
+		self.seats[i]:SetRenderMode( RENDERMODE_TRANSCOLOR )
+		if i == 1 then
+			self.seats[i]:SetPos(console:LocalToWorld(Vector(40, 20, 0)))
+			self.seats[i]:SetAngles(console:LocalToWorldAngles(Angle(0,90,0)))
+		end
+		if i == 2 then
+			self.seats[i]:SetPos(console:LocalToWorld(Vector(40, -20, 0)))
+			self.seats[i]:SetAngles(console:LocalToWorldAngles(Angle(0,90,0)))
+		end
+		self.seats[i]:Spawn()
+		self.seats[i]:Activate()
+		self.seats[i]:SetNWInt("selectedWeapon", 0)
+		//self.seats[i]:SetNoDraw(true)
+		self.seats[i]:SetNotSolid(true)
+		self.seats[i]:SetParent(console)
+		self.seats[i].wac_ignore = true
+		self.seats[i]:SetNWEntity("wac_aircraft", self)
+		self.seats[i]:SetKeyValue("limitview","0")
+		self.seats[i]:SetNWBool("droneSeat", true)
+		self.seats[i]:SetNWInt("droneSeatIndex", i)
+		self.seats[i].droneSeat = true
+		self:SetNWInt("seat_"..i.."_actwep", 1)
+		e:addVehicle(self.seats[i])
+		self:AddOnRemove(self.seats[i])
+	end
+	
+end
+
+// Seat 1 = pilot | Seat 2 = Camera
+function ENT:CDroneEnter(ply, console, seat)
+	if (!self.CDrone) then return end
+	self:addDroneSeats(console)
+	ply:EnterVehicle(self.seats[seat])
+	self:updateSeats()
+
+	ply.wac = ply.wac or {}
+	ply.wac.lastEnter = CurTime()
+	ply.wac.hasInputWithDrone = false
+	
+	net.Start("dconsole_drone_entered")
+	net.Send(ply)
+end
 
 function ENT:Use(act, cal)
 	if self.disabled then return end
 	if act.wac and act.wac.lastEnter and act.wac.lastEnter+0.5 > CurTime() then return end
 	local d = self.MaxEnterDistance
+	if (self.CDrone) then d = 0 end //DRONE
 	local v
 	for k, veh in pairs(self.seats) do
 		if veh and veh:IsValid() then
@@ -553,6 +631,7 @@ function ENT:updateSeats()
 			end
 		end
 	end
+	if self.seats[1] == nil then return end
 	if !IsValid(self.seats[1]:GetDriver()) then
 		self.controls.pitch = 0
 		self.controls.yaw = 0
@@ -816,6 +895,8 @@ end
 
 
 function ENT:receiveInput(name, value, seat)
+	local passenger = self.passengers[seat]
+
 	if seat == 1 then
 		if name == "Start" and value>0.5 then
 			self:setEngine(!self.active)
@@ -830,17 +911,18 @@ function ENT:receiveInput(name, value, seat)
 		elseif name == "Hover" and value>0.5 then
 			self:SetHover(!self:GetHover())
 		elseif name == "FreeView" then
-			self.passengers[seat].wac.mouseInput = (value < 0.5)
+			passenger.wac.mouseInput = (value < 0.5)
 		elseif name == "Flares" and value > 0.5 then
 			self:FireFlares()
 		end
 	end
-	if name == "Exit" and value>0.5 and self.passengers[seat].wac.lastEnter<CurTime()-0.5 then
-		self:EjectPassenger(self.passengers[seat])
+
+	if name == "Exit" and value>0.5 and passenger.wac.lastEnter<CurTime()-0.5 then
+		self:EjectPassenger(passenger)
 	elseif name == "Fire" then
 		self:fireWeapon(value > 0.5, seat)
 	elseif name == "NextWeapon" and value > 0.5 then
-		self:nextWeapon(seat, self.passengers[seat])
+		self:nextWeapon(seat, passenger)
 	end
 end
 
@@ -1176,8 +1258,13 @@ function ENT:PhysicsCollide(cdat, phys)
 			self.Entity:EmitSound("vehicles/v8/vehicle_impact_heavy"..math.random(1,4)..".wav")
 			local lasta=(self.LastDamageTaken<CurTime()+6 and self.LastAttacker or self.Entity)
 			for k, p in pairs(self.passengers) do
-				if p and p:IsValid() then
-					p:TakeDamage(dmg/5, lasta, self.Entity)
+				if IsValid(p) then
+					local v = p:GetVehicle()
+					if (IsValid(v) and v.droneSeat) then
+						continue
+					end
+					if !self.CDrone then p:TakeDamage(dmg/5, lasta, self.Entity) end
+					
 				end
 			end
 		end
@@ -1185,8 +1272,14 @@ function ENT:PhysicsCollide(cdat, phys)
 		if (self.disabled and cdat.HitEntity:GetClass() == "worldspawn") then
 			self.DeadOnGround = true
 			for k, p in pairs(self.passengers) do
-				if p and p:IsValid() then
-					p:TakeDamage(1000, self.LastDamageTaken<CurTime()+6 and self.LastAttacker or self.Entity, self.Entity)
+				if IsValid(p) then
+					local v = p:GetVehicle()
+					if (IsValid(v) and v.droneSeat) then
+						self:EjectPassenger(p)
+						continue
+					end
+
+					if !self.CDrone then p:TakeDamage(1000, self.LastDamageTaken<CurTime()+6 and self.LastAttacker or self.Entity, self.Entity) print("NO FDRONEE!!") end
 				end
 			end
 			self.passengers={}
@@ -1457,6 +1550,10 @@ function ENT:AddOnRemove(f)
 end
 
 function ENT:OnRemove()
+	// DRONES //
+	if (self.CDrone) then
+		table.RemoveByValue(CDrones.ActiveDrones, self)
+	end
 	self:StopAllSounds()
 	for _,p in pairs(self.passengers) do
 		if IsValid(p) then
