@@ -1,7 +1,6 @@
-
-
 include("shared.lua")
 
+CDrone = CDrone or {}
 
 ENT.RenderGroup = RENDERGROUP_BOTH
 
@@ -43,7 +42,6 @@ function ENT:Initialize()
 	self.Emitter = ParticleEmitter(self:GetPos())
 	self.IsOn = false
 	self.LastThink = CurTime()
-
 	self.weapons = {}
 	self.weaponAttachments = {}
 	if self.WeaponAttachments then
@@ -327,8 +325,15 @@ function ENT:viewCalcThirdPerson(k, p, view)
 	then
 		ang = self:GetAngles()
 	else
-		ang = p:GetAimVector():Angle()
-		ang.r = view.angles.r
+		local v = p:GetVehicle()
+		if (IsValid(v) and v:GetNWBool("droneSeat")) then
+			local heliSeatAngle = self:LocalToWorldAngles(self.DroneSeatAngle or Angle(0, -90, 0))
+			local _, angle = LocalToWorld(Vector(0,0,0), p:LocalEyeAngles(), Vector(0,0,0), heliSeatAngle)
+			ang = angle
+		else
+			ang = p:GetAimVector():Angle()
+			ang.r = view.angles.r
+		end
 	end
 	ang:RotateAroundAxis(ang:Right(), -self.thirdPerson.angle)
 	local origin = self:LocalToWorld(self.thirdPerson.position)
@@ -348,23 +353,48 @@ end
 function ENT:viewCalcFirstPerson(k, p, view)
 	p.wac = p.wac or {}
 	view.origin = self:LocalToWorld(Vector(0,0,34.15)*self.Scale+self.Seats[k].pos)
+
+	local v = p:GetVehicle()
+	local camOffset = Vector(0,0,0)
+
+	if (IsValid(v) and v:GetNWBool("droneSeat")) then
+		local index = v:GetNWInt("droneSeatIndex", 0)
+		local cfg = self.DroneSeatValues and self.DroneSeatValues[index]
+		if (cfg and cfg.camOffset) then
+			local pos, ang = LocalToWorld(cfg.camOffset, Angle(0,0,0), Vector(0,0,0), self:GetAngles())
+			camOffset = pos
+		end
+	end
+
 	if
 		k == 1
 		and p:GetInfo("wac_cl_air_mouse") == "1"
 		and !p.wac.viewFree
 	then
 		self.viewTarget = {
-			origin = Vector(0,0,0),
+			origin = camOffset,
 			angles = Angle(0,0,0),
 			fov = view.fov
 		}
 	else
-		self.viewTarget = {
-			origin = Vector(0,0,0),
-			angles = p:GetAimVector():Angle() - self:GetAngles(),
-			fov = view.fov
-		}
-		self.viewTarget.angles.r = self.viewTarget.angles.r + self:GetAngles().r
+		if (IsValid(v) and v:GetNWBool("droneSeat")) then
+			local heliSeatAngle = self:LocalToWorldAngles(self.DroneSeatAngle or Angle(0, -90, 0))
+			local _, angle = LocalToWorld(Vector(0,0,0), p:LocalEyeAngles(), Vector(0,0,0), heliSeatAngle)
+			
+			self.viewTarget = {
+				origin = camOffset,
+				angles = angle - self:GetAngles(),
+				fov = view.fov
+			}
+			self.viewTarget.angles.r = self.viewTarget.angles.r + self:GetAngles().r
+		else
+			self.viewTarget = {
+				origin = Vector(0,0,0),
+				angles = p:GetAimVector():Angle() - self:GetAngles(),
+				fov = view.fov
+			}
+			self.viewTarget.angles.r = self.viewTarget.angles.r + self:GetAngles().r
+		end
 	end
 	return view
 end
@@ -455,6 +485,11 @@ local HudMat = Material("WeltEnSTurm/helihud/arrow")
 local HudCol = Color(70,199,50,150)
 local Black = Color(0,0,0,200)
 function ENT:DrawPilotHud()
+	if self.CDrone then 
+		local ply = LocalPlayer()
+		if (IsValid(ply:GetVehicle())) then v = ply:GetVehicle() end
+		if self:getPassenger(1) != LocalPlayer() or v:GetThirdPersonMode() then return end
+	end
 	local pos = self:GetPos()
 	local fwd = self:GetForward()
 	local ri = self:GetRight()
@@ -464,7 +499,12 @@ function ENT:DrawPilotHud()
 	
 	local uptm = self.rotorRpm
 	local upm = self.smoothUp
-	cam.Start3D2D(self:LocalToWorld(Vector(20,3.75,37.75)*self.Scale+self.Seats[1].pos), ang, 0.015*self.Scale)
+
+	if (self.CDrone) then
+		cam.Start3D2D(self:LocalToWorld(self.DroneSeatValues[1].camOffset + Vector(93, 3.75, 85)), ang, 0.015*self.Scale)
+	else
+		cam.Start3D2D(self:LocalToWorld(Vector(20,3.75,37.75)*self.Scale+self.Seats[1].pos), ang, 0.015*self.Scale)
+	end
 	surface.SetDrawColor(HudCol)
 
 	local rects = {
@@ -541,6 +581,7 @@ function ENT:DrawWeaponSelection()
 	local ang = self:GetAngles()
 	ang:RotateAroundAxis(ri, 90)
 	ang:RotateAroundAxis(fwd, 90)
+	
 	for k, t in pairs(self.Seats) do
 		if k != "BaseClass" and self:getWeapon(k) then
 			cam.Start3D2D(self:LocalToWorld(Vector(20,5,25)*self.Scale + t.pos), ang, 0.02*self.Scale)
@@ -560,7 +601,8 @@ end
 function ENT:Draw()
 	self:DrawModel()
 	if !self.Seats or self:GetNWBool("locked") then return end
-	self:DrawPilotHud()
+		self:DrawPilotHud()
+
 	self:DrawWeaponSelection()
 	if self.engineRpm > 0.2 and self.SmokePos then
 		if (not IsValid(self.Emitter)) then

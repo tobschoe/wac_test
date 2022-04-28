@@ -2,6 +2,9 @@
 include "wac/aircraft.lua"
 include "wac/keyboard.lua"
 
+local meta = FindMetaTable("Player")
+local GetVehicle = meta.GetVehicle
+
 wac.hook("wacAirAddInputs", "wac_aircraft_baseinputs", function()
 
 	wac.aircraft.addControls("Flight Controls", {
@@ -55,7 +58,7 @@ if SERVER then
 
 	concommand.Add("wac_air_input", function(p, c, a)
 		if IsValid(p) and p:Alive() then
-			local v = p:GetVehicle()
+			local v = GetVehicle(p)
 			if IsValid(v) then
 				local e = v:GetNWEntity("wac_aircraft")
 				if IsValid(e) then
@@ -67,16 +70,28 @@ if SERVER then
 
 
 	wac.hook("Think", "wac_aircraft_mouseinput", function()
-		for _, p in pairs(player.GetAll()) do
-			local seat = p:GetVehicle()
-			if IsValid(seat) then
+		for _, p in pairs (player.GetAll()) do
+			local seat = GetVehicle(p)
+			if (IsValid(seat)) then
 				local heli = seat:GetNWEntity("wac_aircraft")
 				if IsValid(heli) and p.wac.mouseInput and p:GetInfo("wac_cl_air_mouse") == "1" then
 					local m = tonumber(p:GetInfo("wac_cl_air_sensitivity") or "1")/1.5
 					local vLocal = nil
 
+					local droneSeat = seat.droneSeat
+
 					if (p.LocalEyeAngles) then
-						local worldEyeAngles = seat:LocalToWorldAngles(p:LocalEyeAngles())
+						local worldEyeAngles = Angle(0,0,0)
+
+						if (droneSeat) then
+							local heliSeatAngle = heli:LocalToWorldAngles(heli.DroneSeatAngle or Angle(0, -90, 0))
+							local _, ang = LocalToWorld(Vector(0,0,0), p:LocalEyeAngles(), Vector(0,0,0), heliSeatAngle)
+							worldEyeAngles = ang
+						else
+							worldEyeAngles = seat:LocalToWorldAngles(p:LocalEyeAngles())
+						end
+						
+						//local worldEyeAngles = p:EyeAngles() //drone
 						vLocal = heli:WorldToLocal(heli:GetPos() + worldEyeAngles:Forward())
 					else
 						vLocal = heli:WorldToLocal(heli:GetPos() + p:GetAimVector())
@@ -87,6 +102,19 @@ if SERVER then
 					local pitchInput = math.Clamp(vLocal.z*m*(p:GetInfo("wac_cl_air_mouse_invert_pitch")=="1" and 1 or -1)*10, -1, 1)
 					local yawInput = math.Clamp(vLocal.y*m*(p:GetInfo("wac_cl_air_mouse_invert_yawroll")=="1" and 1 or -1)*10, -1, 1)
 					
+					if (droneSeat) then
+						local tbl = p.wac
+						if (tbl and not tbl.hasInputWithDrone) then
+							if (math.abs(pitchInput) == 1 or math.abs(yawInput) == 1) then
+								// If the player has not had normal inputs since entering the drone, reject the input.
+								// This is because after entering a drone the player must move their mouse, otherwise the helicopter thinks they are attempting to yaw fully and the helicopter spins out of control.
+								continue 
+							else
+								tbl.hasInputWithDrone = true
+							end
+						end
+					end
+
 					heli:receiveInput(
 						"Pitch",
 						pitchInput,
